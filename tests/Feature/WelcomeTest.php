@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\Redis;
 use App\Models\User;
 
 it('increments the page count for each visit', function () {
