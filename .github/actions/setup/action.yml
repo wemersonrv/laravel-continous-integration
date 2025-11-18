@@ -28,6 +28,7 @@ runs:
     - name: Setup Cache Environment
       id: ext-cache
       uses: shivammathur/cache-extensions@v1
+      if: inputs.php-extensions == true
       with:
         php-version: ${{ inputs.php-version }}
         extensions: ${{ inputs.php-extensions }}
@@ -35,6 +36,7 @@ runs:
 
     - name: Cache PHP Extensions
       uses: actions/cache@v4
+      if: inputs.php-extensions == true
       with:
         path: ${{ steps.ext-cache.outputs.dir }}
         key: ${{ steps.ext-cache.outputs.key }}
