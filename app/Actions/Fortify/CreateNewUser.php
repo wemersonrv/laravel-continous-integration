@@ -17,10 +17,7 @@ class CreateNewUser implements CreatesNewUsers
      *
      * @param  array<string, string>  $input
      */
-    public function create(array $input): User
-    {
-        // Eu fiz alguma coisa errada aqui e fiz uma PR
-        // Ela não deve ser aceita, é só para fins de estudo mesmo
+    public function create(array $input): User     {
         Validator::make($input, [
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
