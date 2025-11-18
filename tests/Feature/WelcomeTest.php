@@ -1,7 +1,7 @@
 <?php
 
-use Illuminate\Support\Facades\Redis;
 use App\Models\User;
+use Illuminate\Support\Facades\Redis;
 
 it('increments the page count for each visit', function () {
     Redis::del('landing-page-views');
