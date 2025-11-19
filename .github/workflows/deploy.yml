@@ -30,11 +30,10 @@ jobs:
       - name: Deploy to RunCloud (mimic GitHub push webhook)
         run: |
           # gera um ID de entrega (igual ao GitHub fornece)
-          DELIVERY_ID="$(
-            uuidgen || python - <<'PY'
-            import uuid,sys
-            print(uuid.uuid4())
-            PY
+          DELIVERY_ID="$(uuidgen || python - <<'PY'
+          import uuid,sys
+          print(uuid.uuid4())
+          PY
           )"
           # monta payload mínimo parecido com push
           cat > /tmp/runcloud_payload.json <<EOF
@@ -58,8 +57,8 @@ jobs:
 
           # envia com headers parecidos com o GitHub
           curl -v -X POST "$DEPLOY_URL" \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: push" \
-            -H "X-GitHub-Delivery: $DELIVERY_ID" \
-            -H "User-Agent: GitHub-Hookshot/1.0" \
-            --data-binary @/tmp/runcloud_payload.json
+          -H "Content-Type: application/json" \
+          -H "X-GitHub-Event: push" \
+          -H "X-GitHub-Delivery: $DELIVERY_ID" \
+          -H "User-Agent: GitHub-Hookshot/1.0" \
+          --data-binary @/tmp/runcloud_payload.json
