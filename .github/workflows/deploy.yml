@@ -27,38 +27,83 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Deploy to RunCloud (mimic GitHub push webhook)
+      - name: Deploy to RunCloud (full push-like payload + HMAC)
+        env:
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          RUNCLOUD_WEBHOOK_SECRET: ${{ secrets.RUNCLOUD_WEBHOOK_SECRET || '' }}
         run: |
-          # gera um ID de entrega (igual ao GitHub fornece)
+          set -euo pipefail
+
+          # delivery id
           DELIVERY_ID="$(uuidgen || python - <<'PY'
           import uuid,sys
           print(uuid.uuid4())
           PY
           )"
-          # monta payload mínimo parecido com push
-          cat > /tmp/runcloud_payload.json <<EOF
+
+          # determine branch (workflow_run.head_branch exists on workflow_run events)
+          BRANCH="${{ github.event.workflow_run && github.event.workflow_run.head_branch || github.ref_name || '' }}"
+          # ensure ref format
+          if [ -n "$BRANCH" ]; then
+          REF="refs/heads/$BRANCH"
+          else
+          REF="${{ github.ref }}"
+          fi
+
+          # construct a push-like payload
+          cat > /tmp/runcloud_push_payload.json <<EOF
           {
-            "ref": "${{ github.ref }}",
+            "ref": "${REF}",
             "before": "${{ github.event.before || '' }}",
             "after": "${{ github.sha }}",
+            "compare": "https://github.com/${{ github.repository }}/compare/${{ github.event.before || '' }}...${{ github.sha }}",
+            "commits": [
+              {
+                "id": "${{ github.sha }}",
+                "message": "${{ github.event.workflow_run && github.event.workflow_run.head_commit && github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}",
+                "timestamp": "${{ github.event.workflow_run && github.event.workflow_run.updated_at || '' }}",
+                "author": { "name": "${{ github.actor }}", "email": "" },
+                "url": ""
+              }
+            ],
             "head_commit": {
               "id": "${{ github.sha }}",
-              "message": "${{ github.event.workflow_run && github.event.workflow_run.head_commit && github.event.workflow_run.head_commit.message || '' }}",
+              "message": "${{ github.event.workflow_run && github.event.workflow_run.head_commit && github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}",
               "timestamp": "${{ github.event.workflow_run && github.event.workflow_run.updated_at || '' }}",
-              "author": { "name": "${{ github.actor }}" }
+              "author": { "name": "${{ github.actor }}", "email": "" }
             },
             "repository": {
+              "id": 0,
               "full_name": "${{ github.repository }}",
-              "html_url": "https://github.com/${{ github.repository }}"
+              "name": "${{ github.repository }}",
+              "html_url": "https://github.com/${{ github.repository }}",
+              "default_branch": "${{ github.event.repository && github.event.repository.default_branch || '' }}",
+              "clone_url": "https://github.com/${{ github.repository }}.git"
             },
+            "pusher": { "name": "${{ github.actor }}", "email": "" },
             "sender": { "login": "${{ github.actor }}" }
           }
           EOF
 
-          # envia com headers parecidos com o GitHub
+          # compute signature header if secret present
+          SIGN_HEADER=""
+          if [ -n "${RUNCLOUD_WEBHOOK_SECRET}" ]; then
+          # POSIX method with openssl and xxd
+          SIG=$(printf '%s' "$(cat /tmp/runcloud_push_payload.json)" | openssl dgst -sha256 -hmac "$RUNCLOUD_WEBHOOK_SECRET" -binary | xxd -p -c 256)
+          SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
+          fi
+
+          # show debug (optional — cuidado com secrets nos logs)
+          echo "Sending to $DEPLOY_URL"
+          echo "Ref: $REF"
+          echo "Delivery: $DELIVERY_ID"
+          echo "Payload size: $(wc -c < /tmp/runcloud_push_payload.json) bytes"
+
+          # finally curl
           curl -v -X POST "$DEPLOY_URL" \
           -H "Content-Type: application/json" \
           -H "X-GitHub-Event: push" \
           -H "X-GitHub-Delivery: $DELIVERY_ID" \
           -H "User-Agent: GitHub-Hookshot/1.0" \
-          --data-binary @/tmp/runcloud_payload.json
+          ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
+          --data-binary @/tmp/runcloud_push_payload.json
