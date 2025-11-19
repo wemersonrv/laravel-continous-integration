@@ -27,15 +27,39 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Deploy to RunCloud (envia payload JSON completo)
+      - name: Deploy to RunCloud (mimic GitHub push webhook)
         run: |
-          printf '%s\n' "$GITHUB_EVENT_JSON" > /tmp/github_event_payload.json
-          # envia com Content-Type: application/json
-          curl -X POST "$DEPLOY_URL" \
-               -H "Content-Type: application/json" \
-               --data-binary @/tmp/github_event_payload.json
+          # gera um ID de entrega (igual ao GitHub fornece)
+          DELIVERY_ID="$(
+            uuidgen || python - <<'PY'
+            import uuid,sys
+            print(uuid.uuid4())
+            PY
+          )"
+          # monta payload mínimo parecido com push
+          cat > /tmp/runcloud_payload.json <<EOF
+          {
+            "ref": "${{ github.ref }}",
+            "before": "${{ github.event.before || '' }}",
+            "after": "${{ github.sha }}",
+            "head_commit": {
+              "id": "${{ github.sha }}",
+              "message": "${{ github.event.workflow_run && github.event.workflow_run.head_commit && github.event.workflow_run.head_commit.message || '' }}",
+              "timestamp": "${{ github.event.workflow_run && github.event.workflow_run.updated_at || '' }}",
+              "author": { "name": "${{ github.actor }}" }
+            },
+            "repository": {
+              "full_name": "${{ github.repository }}",
+              "html_url": "https://github.com/${{ github.repository }}"
+            },
+            "sender": { "login": "${{ github.actor }}" }
+          }
+          EOF
 
-#      - name: Deploy to Runcloud
-#        env:
-#          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
-#        run: curl -X POST $DEPLOY_URL
+          # envia com headers parecidos com o GitHub
+          curl -v -X POST "$DEPLOY_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: push" \
+            -H "X-GitHub-Delivery: $DELIVERY_ID" \
+            -H "User-Agent: GitHub-Hookshot/1.0" \
+            --data-binary @/tmp/runcloud_payload.json
