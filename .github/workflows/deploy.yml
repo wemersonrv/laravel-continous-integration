@@ -16,8 +16,26 @@ jobs:
 
     environment: ${{ github.event_name == 'workflow_run' && 'staging' || 'production' }}
 
+    env:
+      DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+      # monta o JSON completo do evento GitHub
+      GITHUB_EVENT_JSON: ${{ toJson(github.event) }}
+
     steps:
-      - name: Deploy to Runcloud
-        env:
-          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
-        run: curl $DEPLOY_URL
+      - name: Debug - show small info
+        run: |
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Event name (github.event_name): ${{ github.event_name }}"
+
+      - name: Deploy to RunCloud (envia payload JSON completo)
+        run: |
+          printf '%s\n' "$GITHUB_EVENT_JSON" > /tmp/github_event_payload.json
+          # envia com Content-Type: application/json
+          curl -X POST "$DEPLOY_URL" \
+               -H "Content-Type: application/json" \
+               --data-binary @/tmp/github_event_payload.json
+
+#      - name: Deploy to Runcloud
+#        env:
+#          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+#        run: curl -X POST $DEPLOY_URL
