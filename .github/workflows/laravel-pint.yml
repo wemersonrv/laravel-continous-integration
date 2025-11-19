@@ -20,6 +20,8 @@ jobs:
         with:
           php-version: '8.3'
           php-extensions: 'json, dom, curl, libxml, mbstring'
+          nova-email: ${{ secrets.NOVA_EMAIL }}
+          nova-password: ${{ secrets.NOVA_PASSWORD }}
 
       - name: Install Laravel Pint
         run: composer global require laravel/pint
@@ -27,10 +29,10 @@ jobs:
       - name: Run Pint
         run: pint
 
-      - name: Push Changes Back to the Repository
+      - name: Push Changes Back to Repo
         run: |
-          git config user.name "gh-actions[bot]"
-          git config user.email "gh-actions[bot]@users.noreply.github.com"
+          git config user.name "gh-actions"
+          git config user.email "gh@laracasts.com"
           git add .
           git commit -m "Laravel Pint" || exit 0
           git push

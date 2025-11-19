@@ -1,10 +1,12 @@
-name: Tests
+name: Run Tests
 
 on:
-  pull_request
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  run-tests:
+  tests:
     runs-on: ubuntu-latest
 
     services:
@@ -28,6 +30,9 @@ jobs:
         uses: ./.github/actions/setup
         with:
           php-version: '8.3'
+          nova-email: ${{ secrets.NOVA_EMAIL }}
+          nova-password: ${{ secrets.NOVA_PASSWORD }}
+          coverage: xdebug
 
       - name: Install Project Dependencies
         run: composer install -q --no-interaction --no-progress
@@ -39,4 +44,4 @@ jobs:
         run: php artisan key:generate
 
       - name: Run Tests
-        run: php artisan test --compact
+        run: php artisan test --compact --coverage --min=75
