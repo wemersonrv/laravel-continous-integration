@@ -27,88 +27,32 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Deploy to RunCloud (payload corrigido)
+      - name: Deploy to RunCloud (debug response body + headers)
         env:
-          WEBHOOK_URL: ${{ vars.DEPLOY_URL }}
-          DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET || '' }}
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
         run: |
           set -euo pipefail
-
-          # delivery id
           DELIVERY_ID="$(uuidgen || python - <<'PY'
           import uuid
           print(uuid.uuid4())
           PY
           )"
-
-          # branch: prefer workflow_run.head_branch se existir, senão usar GITHUB_REF
-          if [ -n "${{ github.event.workflow_run && github.event.workflow_run.head_branch || '' }}" ]; then
-          BRANCH="${{ github.event.workflow_run.head_branch }}"
-          else
-          # remove refs/heads/ se presente
-          REF_RAW="${GITHUB_REF:-}"
-          if [ -n "$REF_RAW" ] && [[ "$REF_RAW" == refs/* ]]; then
-          BRANCH="${REF_RAW##*/}"
-          else
-          BRANCH="main"
-          fi
-          fi
-
-          REF="refs/heads/${BRANCH}"
-          AFTER="${GITHUB_SHA:-}"
-          COMMIT_MSG="${{ github.event.workflow_run && github.event.workflow_run.head_commit && github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}"
-
-          # Pega só o nome do repositório (parte depois da barra) usando shell
-          REPO_FULL="${GITHUB_REPOSITORY:-${{ github.repository }}}"
-          REPO_NAME="${REPO_FULL##*/}"
-
-          # monta payload usando variáveis do shell (não use GitHub expression com split aqui)
-          cat > /tmp/push_payload.json <<EOF
-          {
-            "ref": "${REF}",
-            "before": "",
-            "after": "${AFTER}",
-            "compare": "https://github.com/${REPO_FULL}/compare/...${AFTER}",
-            "commits": [
-              {
-                "id": "${AFTER}",
-                "message": "$(printf '%s' "$COMMIT_MSG" | sed 's/"/\\"/g')",
-                "timestamp": "${{ github.event.workflow_run && github.event.workflow_run.updated_at || '' }}",
-                "author": { "name": "${GITHUB_ACTOR:-}", "email": "" },
-                "url": ""
-              }
-            ],
-            "head_commit": {
-              "id": "${AFTER}",
-              "message": "$(printf '%s' "$COMMIT_MSG" | sed 's/"/\\"/g')",
-              "timestamp": "${{ github.event.workflow_run && github.event.workflow_run.updated_at || '' }}",
-              "author": { "name": "${GITHUB_ACTOR:-}", "email": "" }
-            },
-            "repository": {
-              "id": 0,
-              "full_name": "${REPO_FULL}",
-              "name": "${REPO_NAME}",
-              "html_url": "https://github.com/${REPO_FULL}",
-              "default_branch": "${{ github.event.repository && github.event.repository.default_branch || 'main' }}",
-              "clone_url": "https://github.com/${REPO_FULL}.git"
-            },
-            "pusher": { "name": "${GITHUB_ACTOR:-}", "email": "" },
-            "sender": { "login": "${GITHUB_ACTOR:-}" }
-          }
-          EOF
-
-          # assinatura opcional
-          SIGN_HEADER=""
-          if [ -n "${DEPLOY_HOOK_SECRET}" ]; then
-          SIG=$(printf '%s' "$(cat /tmp/push_payload.json)" | openssl dgst -sha256 -hmac "$DEPLOY_HOOK_SECRET" -binary | xxd -p -c 256)
-          SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
-          fi
-
-          echo "Sending payload (${#REF} ref) for repo ${REPO_FULL} (name=${REPO_NAME})"
-          curl -v -X POST "${WEBHOOK_URL}" \
+          # assume /tmp/push_payload.json already exists (se não, gere o payload como antes)
+          # envia e salva headers e body
+          curl -sS -D /tmp/runcloud_resp_headers.txt \
+          -o /tmp/runcloud_resp_body.html \
+          -X POST "$DEPLOY_URL" \
           -H "Content-Type: application/json" \
           -H "X-GitHub-Event: push" \
-          -H "X-GitHub-Delivery: ${DELIVERY_ID}" \
+          -H "X-GitHub-Delivery: $DELIVERY_ID" \
           -H "User-Agent: GitHub-Hookshot/1.0" \
-          ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
-          --data-binary @/tmp/push_payload.json
+          --data-binary @/tmp/push_payload.json || true
+
+          echo "==== Response headers ===="
+          sed -n '1,200p' /tmp/runcloud_resp_headers.txt || true
+          echo "==== Response body (first 500 chars) ===="
+          head -c 500 /tmp/runcloud_resp_body.html || true
+          echo
+          echo "Saved full response body to /tmp/runcloud_resp_body.html (inspect in workflow logs or upload artifact)"
+          # opcional: fazer upload como artifact (descomente se quiser)
+          # mkdir -p /github/workspace/artifacts && cp /tmp/runcloud_resp_body.html /github/workspace/artifacts/ && echo "Artifact saved"
