@@ -27,33 +27,105 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Get last push payload from GitHub API
+      - name: Build push-like payload and send to RunCloud
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          # valores extraídos do evento workflow_run (pode ser vazio se não houver)
+          WF_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          WF_HEAD_COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}
+          WF_UPDATED_AT: ${{ github.event.workflow_run.updated_at || '' }}
+          REPO_FULL: ${{ github.repository }}
+          DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET || '' }}  # opcional para HMAC
         run: |
-          curl -s \
-            -H "Authorization: token ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${GITHUB_REPOSITORY}/events \
-            | jq '[ .[] | select(.type=="PushEvent") ][0].payload' \
-            > /tmp/push_payload.json
+          set -euo pipefail
 
-          echo "=== PUSH PAYLOAD ==="
-          head -c 500 /tmp/push_payload.json
+          # fallback se não existir workflow_run (precaução)
+          BRANCH="${WF_HEAD_BRANCH:-}"
+          if [ -z "$BRANCH" ]; then
+            # tenta extrair de GITHUB_REF (ex: refs/heads/main)
+            if [ -n "${GITHUB_REF:-}" ] && [[ "${GITHUB_REF}" == refs/* ]]; then
+              BRANCH="${GITHUB_REF##*/}"
+            else
+              BRANCH="main"
+            fi
+          fi
+          REF="refs/heads/${BRANCH}"
 
-      - name: Send PUSH payload to webhook
-        env:
-          WEBHOOK_URL: ${{ vars.DEPLOY_URL }}
-        run: |
-          curl -sS -D /tmp/h.txt -o /tmp/b.txt \
-            -X POST "$WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: push" \
-            -H "X-GitHub-Delivery: $(uuidgen)" \
-            --data-binary @/tmp/push_payload.json
+          AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
+          COMMIT_MSG="${WF_HEAD_COMMIT_MSG}"
+          UPDATED_AT="${WF_UPDATED_AT:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 
-          echo "HEADERS:"
-          sed -n '1,60p' /tmp/h.txt
+          REPO_NAME="${REPO_FULL##*/}"
 
-          echo "BODY:"
-          head -c 500 /tmp/b.txt
+          # monta payload push-like
+          cat > /tmp/push_payload.json <<EOF
+          {
+            "ref": "${REF}",
+            "before": "",
+            "after": "${AFTER}",
+            "compare": "https://github.com/${REPO_FULL}/compare/...${AFTER}",
+            "commits": [
+              {
+                "id": "${AFTER}",
+                "message": "$(printf '%s' "$COMMIT_MSG" | sed 's/"/\\"/g')",
+                "timestamp": "${UPDATED_AT}",
+                "author": { "name": "${GITHUB_ACTOR:-}", "email": "" },
+                "url": ""
+              }
+            ],
+            "head_commit": {
+              "id": "${AFTER}",
+              "message": "$(printf '%s' "$COMMIT_MSG" | sed 's/"/\\"/g')",
+              "timestamp": "${UPDATED_AT}",
+              "author": { "name": "${GITHUB_ACTOR:-}", "email": "" }
+            },
+            "repository": {
+              "id": 0,
+              "full_name": "${REPO_FULL}",
+              "name": "${REPO_NAME}",
+              "html_url": "https://github.com/${REPO_FULL}",
+              "default_branch": "main",
+              "clone_url": "https://github.com/${REPO_FULL}.git"
+            },
+            "pusher": { "name": "${GITHUB_ACTOR:-}", "email": "" },
+            "sender": { "login": "${GITHUB_ACTOR:-}" }
+          }
+          EOF
+
+          echo "Payload size: $(wc -c < /tmp/push_payload.json) bytes; sending as push for ${REF}"
+
+          # assinatura HMAC opcional (X-Hub-Signature-256)
+          SIGN_HEADER=""
+          if [ -n "${DEPLOY_HOOK_SECRET}" ]; then
+          SIG=$(printf '%s' "$(cat /tmp/push_payload.json)" | openssl dgst -sha256 -hmac "${DEPLOY_HOOK_SECRET}" -binary | xxd -p -c 256)
+          SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
+          echo "Computed X-Hub-Signature-256"
+          fi
+
+          # POST e salvar resposta para debug
+          curl -sS -D /tmp/runcloud_resp_headers.txt \
+          -o /tmp/runcloud_resp_body.txt \
+          -X POST "${DEPLOY_URL}" \
+          -H "Accept: application/json" \
+          -H "X-Requested-With: XMLHttpRequest" \
+          -H "Content-Type: application/json" \
+          -H "X-GitHub-Event: push" \
+          -H "X-GitHub-Delivery: $(uuidgen || python -c 'import uuid; print(uuid.uuid4())')" \
+          -H "User-Agent: GitHub-Hookshot/1.0" \
+          ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
+          --data-binary @/tmp/push_payload.json || true
+
+          echo "==== Response headers (first 60 lines) ===="
+          sed -n '1,60p' /tmp/runcloud_resp_headers.txt || true
+          echo "==== Response body (first 600 chars) ===="
+          head -c 600 /tmp/runcloud_resp_body.txt || true
+
+      - name: Upload RunCloud debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runcloud-webhook-debug
+          path: |
+            /tmp/push_payload.json
+            /tmp/runcloud_resp_headers.txt
+            /tmp/runcloud_resp_body.txt
