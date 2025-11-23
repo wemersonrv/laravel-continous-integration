@@ -27,38 +27,33 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Forward raw GitHub event payload (exact push payload)
+      - name: Get last push payload from GitHub API
         env:
-          WEBHOOK_URL: ${{ vars.DEPLOY_URL }}            # endpoint Laravel que processa o webhook
-          DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET || '' }} # opcional, leave empty if none
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          curl -s \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${GITHUB_REPOSITORY}/events \
+            | jq '[ .[] | select(.type=="PushEvent") ][0].payload' \
+            > /tmp/push_payload.json
 
-          # GITHUB_EVENT_PATH contém o JSON CRU do evento que disparou a action
-          if [ -z "${GITHUB_EVENT_PATH:-}" ] || [ ! -f "${GITHUB_EVENT_PATH}" ]; then
-            echo "ERROR: GITHUB_EVENT_PATH not available" >&2
-            exit 1
-          fi
+          echo "=== PUSH PAYLOAD ==="
+          head -c 500 /tmp/push_payload.json
 
-          # opcional: calcular assinatura sha256 como o GitHub envia (header X-Hub-Signature-256)
-          SIGN_HEADER=""
-          if [ -n "${DEPLOY_HOOK_SECRET}" ]; then
-            SIG=$(openssl dgst -sha256 -hmac "${DEPLOY_HOOK_SECRET}" -binary < "${GITHUB_EVENT_PATH}" | xxd -p -c 256)
-            SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
-          fi
-
-          # envia o payload exatamente como está no runner
-          curl -sS -D /tmp/resp_headers.txt -o /tmp/resp_body.txt \
-            -X POST "${WEBHOOK_URL}" \
+      - name: Send PUSH payload to webhook
+        env:
+          WEBHOOK_URL: ${{ vars.DEPLOY_URL }}
+        run: |
+          curl -sS -D /tmp/h.txt -o /tmp/b.txt \
+            -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: ${GITHUB_EVENT_NAME:-unknown}" \
-            -H "X-GitHub-Delivery: $(uuidgen || python -c 'import uuid; print(uuid.uuid4())')" \
-            -H "User-Agent: GitHub-Hookshot/1.0" \
-            ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
-            --data-binary @"${GITHUB_EVENT_PATH}"
+            -H "X-GitHub-Event: push" \
+            -H "X-GitHub-Delivery: $(uuidgen)" \
+            --data-binary @/tmp/push_payload.json
 
-          echo "Sent raw event payload from: ${GITHUB_EVENT_PATH}"
-          echo "Response headers (first 100 lines):"
-          sed -n '1,100p' /tmp/resp_headers.txt || true
-          echo "Response body (first 300 chars):"
-          head -c 300 /tmp/resp_body.txt || true
+          echo "HEADERS:"
+          sed -n '1,60p' /tmp/h.txt
+
+          echo "BODY:"
+          head -c 500 /tmp/b.txt
