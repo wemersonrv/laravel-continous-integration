@@ -27,9 +27,10 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Build minimal RunCloud push payload & POST (bash only)
+      - name: Build payload with 'before' (parent SHA) & POST (bash only)
         env:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET || '' }}
           WF_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
           WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
@@ -38,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # branch / ref
+          # basic values / fallback
           BRANCH="${WF_HEAD_BRANCH:-}"
           if [ -z "$BRANCH" ]; then
             if [ -n "${GITHUB_REF:-}" ] && [[ "${GITHUB_REF}" == refs/* ]]; then
@@ -49,13 +50,38 @@ jobs:
           fi
           REF="refs/heads/${BRANCH}"
 
-          # shas and messages
           AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
-          BEFORE=""   # não temos previous-commit-sha no workflow_run
-          COMMIT_MSG="${WF_COMMIT_MSG}"
-          REPO_FULL="${REPO_FULL:-${GITHUB_REPOSITORY}}"
+          if [ -z "${AFTER}" ]; then
+            echo "ERROR: cannot determine AFTER (commit sha)" >&2
+            exit 1
+          fi
 
-          # escape backslashes, quotes and newlines for JSON
+          REPO_FULL="${REPO_FULL:-${GITHUB_REPOSITORY}}"
+          COMMIT_MSG="${WF_COMMIT_MSG}"
+
+          # ensure jq exists
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not found — installing..."
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+          # query commit info and get parent sha
+          COMMIT_JSON="$(curl -sS -H "Accept: application/vnd.github+json" -H "Authorization: token ${GH_TOKEN}" https://api.github.com/repos/${REPO_FULL}/commits/${AFTER})"
+
+          BEFORE="$(printf '%s' "$COMMIT_JSON" | jq -r '.parents[0].sha // empty')"
+
+          # fallback: if no parent (initial commit), use AFTER as before to satisfy RunCloud non-empty requirement
+          if [ -z "${BEFORE}" ]; then
+            BEFORE="${AFTER}"
+          fi
+
+          echo "AFTER: ${AFTER}"
+          echo "BEFORE: ${BEFORE}"
+          echo "Repo: ${REPO_FULL}"
+          echo "Ref: ${REF}"
+
+          # escape commit message for JSON
           ESC_MSG=$(printf '%s' "$COMMIT_MSG" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g')
 
           # build payload exactly like RunCloud example
@@ -93,8 +119,10 @@ jobs:
           ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
           --data-binary @/tmp/runcloud_push_payload.json || true
 
-          # quick feedback
-          echo "Sent payload (bytes): $(wc -c < /tmp/runcloud_push_payload.json)"
-          sed -n '1,120p' /tmp/runcloud_push_payload.json || true
-          sed -n '1,60p' /tmp/runcloud_resp_headers.txt || true
-          head -c 600 /tmp/runcloud_resp_body.txt || true
+          # logs for quick debugging
+          echo "Payload bytes: $(wc -c < /tmp/runcloud_push_payload.json)"
+          sed -n '1,160p' /tmp/runcloud_push_payload.json || true
+          echo "=== Response headers ==="
+          sed -n '1,160p' /tmp/runcloud_resp_headers.txt || true
+          echo "=== Response body (first 800 chars) ==="
+          head -c 800 /tmp/runcloud_resp_body.txt || true
