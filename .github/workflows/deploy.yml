@@ -17,12 +17,13 @@ jobs:
     environment: ${{ github.event_name == 'workflow_run' && 'staging' || 'production' }}
 
     env:
+      # Extrai a URL de deploy confirme o ambiente (testing, homolog, staging, production, etc...)
       DEPLOY_URL: ${{ vars.DEPLOY_URL }}
-      # monta o JSON completo do evento GitHub
+      # Extrai dados do evento e converte em JSON
       GITHUB_EVENT_JSON: ${{ toJson(github.event) }}
 
     steps:
-      - name: Deploy to Runcloud (Staging or Production)
+      - name: Deploy to Runcloud
         env:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
