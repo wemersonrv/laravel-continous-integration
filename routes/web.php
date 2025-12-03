@@ -14,6 +14,10 @@ Route::get('/', function () {
     ]);
 });
 
+Route::get('/sobre-deploy', function () {
+    return view('sobre-deploy');
+});
+
 Route::middleware([
     'auth:sanctum',
     config('jetstream.auth_session'),
