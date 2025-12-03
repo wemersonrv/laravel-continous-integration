@@ -22,14 +22,17 @@ jobs:
       GITHUB_EVENT_JSON: ${{ toJson(github.event) }}
 
     steps:
-      - name: Build minimal RunCloud push payload & POST
+      - name: Deploy to Runcloud (Staging or Production)
         env:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET || '' }}
-          WF_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+
+          # workflow_run (staging)
           WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
           WF_COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}
+
+          # repo / releases
           REPO_FULL: ${{ github.repository }}
           REL_TAG: ${{ github.event.release.tag_name || '' }}
           REL_NAME: ${{ github.event.release.name || '' }}
@@ -37,85 +40,94 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Force branch ref expected by RunCloud
+          # RunCloud requires ref to be the branch deployed
           REF="refs/heads/main"
 
-          # Determine AFTER and COMMIT_MSG
+          #############################################
+          # 1) Determine AFTER (commit SHA)
+          #############################################
+
           if [ "${GITHUB_EVENT_NAME:-}" = "release" ]; then
             TAG="${REL_TAG}"
-            if [ -z "$TAG" ]; then
-              # fallback: try to use release name or body as version if tag missing
-              TAG=""
-            fi
 
-            # Resolve commit SHA from tag
+            # Try direct lookup via tag ref
+            AFTER=""
             if [ -n "$TAG" ]; then
-              AFTER=$(curl -sS -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO_FULL}/git/ref/tags/${TAG}" | jq -r '.object.sha // empty')
-            else
-              AFTER=""
+              AFTER=$(curl -sS \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO_FULL}/git/ref/tags/${TAG}" \
+                | jq -r '.object.sha // empty')
             fi
 
-            # If we couldn't resolve from tag endpoint, try list tags -> find tag object commit
-            if [ -z "${AFTER}" ] && [ -n "${TAG}" ]; then
-              AFTER=$(curl -sS -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO_FULL}/tags" | jq -r --arg t "$TAG" '.[] | select(.name==$t) | .commit.sha' | head -n1)
+            # Fallback: list tags (covers annotated tags)
+            if [ -z "$AFTER" ] && [ -n "$TAG" ]; then
+              AFTER=$(curl -sS \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO_FULL}/tags" \
+                | jq -r --arg t "$TAG" '.[] | select(.name==$t) | .commit.sha' \
+                | head -n1)
             fi
 
-            if [ -z "${AFTER}" ]; then
-              # final fallback: use workflow SHA or fail
-              AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
-            fi
+            # Final fallback: workflow SHA
+            [ -z "$AFTER" ] && AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
 
-            # Build "New Release vX.Y.Z" message: prefer tag, else release name, else body
-            if [ -n "${TAG}" ]; then
-              VERSION="${TAG}"
-            elif [ -n "${REL_NAME}" ]; then
-              VERSION="${REL_NAME}"
-            elif [ -n "${REL_BODY}" ]; then
-              # try to extract first token resembling vX.Y.Z from body
+            #############################################
+            # 2) Build "New Release vX.Y.Z"
+            #############################################
+            VERSION=""
+            [ -n "${REL_TAG}" ] && VERSION="${REL_TAG}"
+            [ -z "$VERSION" ] && [ -n "${REL_NAME}" ] && VERSION="${REL_NAME}"
+            if [ -z "$VERSION" ] && [ -n "${REL_BODY}" ]; then
               VERSION="$(printf '%s' "${REL_BODY}" | grep -oE 'v[0-9]+(\.[0-9]+)*' | head -n1 || true)"
-            else
-              VERSION=""
             fi
-
-            if [ -n "${VERSION}" ]; then
-              COMMIT_MSG="New Release ${VERSION}"
-            else
-              COMMIT_MSG="${REL_NAME:-Release}"
-            fi
+            COMMIT_MSG="New Release ${VERSION:-Release}"
 
           else
+            #############################################
             # workflow_run (staging)
+            #############################################
             AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
-            COMMIT_MSG="${WF_COMMIT_MSG:-CI deploy trigger}"
+            COMMIT_MSG="${WF_COMMIT_MSG}"
           fi
 
-          if [ -z "${AFTER}" ]; then
-            exit 1
-          fi
+          #############################################
+          # 3) Determine BEFORE (parent commit)
+          #############################################
 
           # ensure jq exists
-          if ! command -v jq >/dev/null 2>&1; then
+          command -v jq >/dev/null 2>&1 || {
             sudo apt-get update -y
             sudo apt-get install -y jq
-          fi
+          }
 
-          # get parent commit (before)
-          COMMIT_JSON="$(curl -sS -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO_FULL}/commits/${AFTER}")"
-          BEFORE="$(printf '%s' "$COMMIT_JSON" | jq -r '.parents[0].sha // empty')"
+          BEFORE=$(curl -sS \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO_FULL}/commits/${AFTER}" \
+            | jq -r '.parents[0].sha // empty')
+
+          # fallback: if no parent (initial commit)
           [ -z "${BEFORE}" ] && BEFORE="${AFTER}"
 
-          # escape message for JSON
-          ESC_MSG=$(printf '%s' "$COMMIT_MSG" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g')
+          #############################################
+          # 4) Escape commit message for JSON
+          #############################################
+          ESC_MSG=$(printf '%s' "$COMMIT_MSG" \
+            | sed -e 's/\\/\\\\/g' \
+                  -e 's/"/\\"/g' \
+                  -e ':a;N;$!ba;s/\n/\\n/g')
 
-          # build payload
+          #############################################
+          # 5) Build final JSON payload
+          #############################################
           cat > /tmp/runcloud_push_payload.json <<EOF
           {
             "ref": "${REF}",
             "before": "${BEFORE}",
             "after": "${AFTER}",
-            "repository": {
-              "full_name": "${REPO_FULL}"
-            },
+            "repository": { "full_name": "${REPO_FULL}" },
             "head_commit": {
               "id": "${AFTER}",
               "url": "https://github.com/${REPO_FULL}/commit/${AFTER}",
@@ -125,18 +137,22 @@ jobs:
           }
           EOF
 
-          # optional signature
+          #############################################
+          # 6) Optional HMAC signature
+          #############################################
           SIGN_HEADER=""
           if [ -n "${DEPLOY_HOOK_SECRET}" ]; then
           SIG=$(openssl dgst -sha256 -hmac "${DEPLOY_HOOK_SECRET}" -binary < /tmp/runcloud_push_payload.json | xxd -p -c 256)
           SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
           fi
 
-          # send
+          #############################################
+          # 7) POST to RunCloud
+          #############################################
           curl -sS -X POST "${DEPLOY_URL}" \
           -H "Content-Type: application/json" \
           -H "X-GitHub-Event: push" \
-          -H "X-GitHub-Delivery: $(uuidgen || python -c 'import uuid; print(uuid.uuid4())')" \
+          -H "X-GitHub-Delivery: $(uuidgen || cat /proc/sys/kernel/random/uuid)" \
           -H "User-Agent: GitHub-Hookshot/1.0" \
           ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
           --data-binary @/tmp/runcloud_push_payload.json
