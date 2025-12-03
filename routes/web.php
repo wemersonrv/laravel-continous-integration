@@ -9,33 +9,27 @@ Route::get('/', function () {
     Redis::incr('landing-page-views');
     $seed = Session::remember('users.seed', fn () => rand(0, 100));
 
-            return view('welcome',
+    return view('welcome',
 
-[
-                                'users' => User::inRandomOrder($seed)->paginate(3),
-                ]);
-
+        [
+            'users' => User::inRandomOrder($seed)->paginate(3),
+        ]);
 
 });
 
-            Route::get('/sobre-deploy', function () {
-                    return          view('sobre-deploy')    ;
-                    });
+Route::get('/sobre-deploy', function () {
+    return view('sobre-deploy');
+});
 
 Route::middleware([
-        'auth:sanctum',
-    config('jetstream.auth_session')    ,
-        'verified',
+    'auth:sanctum',
+    config('jetstream.auth_session'),
+    'verified',
 ])->group(function () {
 
-Route::get('/dashboard', function () {
-                return view('dashboard');
-
-
+    Route::get('/dashboard', function () {
+        return view('dashboard');
 
     })->name('dashboard');
-
-
-
 
 });
