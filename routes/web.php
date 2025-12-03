@@ -18,7 +18,7 @@ Route::get('/', function () {
 });
 
 Route::get('/sobre-deploy', function () {
-    return view('sobre-deploy');
+    return view('sobre-deploy')
 });
 
 Route::middleware([
