@@ -27,7 +27,7 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
           echo "Event name (github.event_name): ${{ github.event_name }}"
 
-      - name: Build payload with 'before' (parent SHA) & POST (bash only) + FIX for release workflow
+      - name: Build payload with 'before' (parent SHA) & POST (bash only)
         env:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,33 +36,61 @@ jobs:
           WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
           WF_COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || 'CI deploy trigger' }}
           REPO_FULL: ${{ github.repository }}
+          REL_TAG: ${{ github.event.release.tag_name || '' }}
+          REL_NAME: ${{ github.event.release.name || '' }}
+          REL_BODY: ${{ github.event.release.body || '' }}
         run: |
           set -euo pipefail
 
-          # Forçar ref = refs/heads/main como exigido pela Runcloud
+          # For production you previously forced REF="refs/heads/main"
+          # Keep that behavior (so RunCloud branch matches). If you prefer to not force,
+          # change the next line to compute REF from branch/tag as needed.
           REF="refs/heads/main"
 
-          AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
-          if [ -z "${AFTER}" ]; then
-            echo "ERROR: cannot determine AFTER (commit sha)" >&2
-            exit 1
+          # Determine AFTER (commit SHA)
+          # For workflow_run we use WF_HEAD_SHA; for release we must resolve tag -> sha
+          if [ "${GITHUB_EVENT_NAME:-}" = "release" ]; then
+            # resolve tag -> object sha
+            TAG="${REL_TAG}"
+            if [ -z "$TAG" ]; then
+              echo "ERROR: release event without tag_name" >&2
+              exit 1
+            fi
+            AFTER=$(curl -sS -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO_FULL}/git/ref/tags/${TAG}" | jq -r '.object.sha // empty')
+            if [ -z "${AFTER}" ]; then
+              echo "ERROR: could not resolve tag ${TAG} to a commit SHA" >&2
+              exit 1
+            fi
+
+            # message: prefer release name, then tag, then body
+            if [ -n "${REL_NAME}" ]; then
+              COMMIT_MSG="${REL_NAME}"
+            elif [ -n "${REL_TAG}" ]; then
+              COMMIT_MSG="Release ${REL_TAG}"
+            elif [ -n "${REL_BODY}" ]; then
+              COMMIT_MSG="${REL_BODY}"
+            else
+              COMMIT_MSG="Release ${REL_TAG}"
+            fi
+          else
+            # workflow_run case (staging): use provided head sha and message
+            AFTER="${WF_HEAD_SHA:-${GITHUB_SHA:-}}"
+            COMMIT_MSG="${WF_COMMIT_MSG:-CI deploy trigger}"
+            if [ -z "${AFTER}" ]; then
+              echo "ERROR: cannot determine AFTER (commit sha)" >&2
+              exit 1
+            fi
           fi
 
-          REPO_FULL="${REPO_FULL:-${GITHUB_REPOSITORY}}"
-          COMMIT_MSG="${WF_COMMIT_MSG}"
-
+          # get BEFORE (parent sha) for the commit
           # ensure jq exists
           if ! command -v jq >/dev/null 2>&1; then
-            echo "jq not found — installing..."
             sudo apt-get update -y
             sudo apt-get install -y jq
           fi
 
-          # query commit info and get parent sha
           COMMIT_JSON="$(curl -sS -H "Accept: application/vnd.github+json" -H "Authorization: token ${GH_TOKEN}" https://api.github.com/repos/${REPO_FULL}/commits/${AFTER})"
-
           BEFORE="$(printf '%s' "$COMMIT_JSON" | jq -r '.parents[0].sha // empty')"
-
           if [ -z "${BEFORE}" ]; then
             BEFORE="${AFTER}"
           fi
@@ -71,9 +99,12 @@ jobs:
           echo "BEFORE: ${BEFORE}"
           echo "Repo: ${REPO_FULL}"
           echo "Ref: ${REF}"
+          echo "Message: ${COMMIT_MSG}"
 
+          # escape commit message for JSON
           ESC_MSG=$(printf '%s' "$COMMIT_MSG" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g')
 
+          # build payload exactly like RunCloud example
           cat > /tmp/runcloud_push_payload.json <<EOF
           {
             "ref": "${REF}",
@@ -91,12 +122,14 @@ jobs:
           }
           EOF
 
+          # optional HMAC signature header
           SIGN_HEADER=""
           if [ -n "${DEPLOY_HOOK_SECRET}" ]; then
-            SIG=$(openssl dgst -sha256 -hmac "${DEPLOY_HOOK_SECRET}" -binary < /tmp/runcloud_push_payload.json | xxd -p -c 256)
-            SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
+          SIG=$(openssl dgst -sha256 -hmac "${DEPLOY_HOOK_SECRET}" -binary < /tmp/runcloud_push_payload.json | xxd -p -c 256)
+          SIGN_HEADER="X-Hub-Signature-256: sha256=${SIG}"
           fi
 
+          # send
           curl -sS -D /tmp/runcloud_resp_headers.txt -o /tmp/runcloud_resp_body.txt \
           -X POST "${DEPLOY_URL}" \
           -H "Content-Type: application/json" \
@@ -106,6 +139,7 @@ jobs:
           ${SIGN_HEADER:+-H "$SIGN_HEADER"} \
           --data-binary @/tmp/runcloud_push_payload.json || true
 
+          # logs for quick debugging
           echo "Payload bytes: $(wc -c < /tmp/runcloud_push_payload.json)"
           sed -n '1,160p' /tmp/runcloud_push_payload.json || true
           echo "=== Response headers ==="
